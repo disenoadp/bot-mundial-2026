@@ -1,0 +1,1 @@
+# bot-mundial-2026
