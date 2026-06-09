@@ -6,16 +6,15 @@ from scipy.stats import poisson
 from datetime import datetime
 import pytz
 
-# Configuración de la interfaz del Dashboard
-st.set_page_config(page_title="Bot Quiniela Mundial 2026", page_icon="⚽", layout="wide")
+# Configuración del Dashboard
+st.set_page_config(page_title="Bot Inteligente Quiniela", page_icon="⚽", layout="wide")
 
-# Recuperar el Token seguro de la API desde los Secrets de Streamlit
 API_TOKEN = st.secrets["FOOTBALL_API_TOKEN"]
 BASE_URL = "https://api.football-data.org/v4/"
 HEADERS = {"X-Auth-Token": API_TOKEN}
 
 # ==========================================
-# 1. CONEXIÓN EN LÍNEA Y DESCARGA DE DATA REAL
+# 1. DESCARGA EN VIVO DEL CALENDARIO OFICIAL
 # ==========================================
 @st.cache_data(ttl=3600)
 def obtener_partidos_mundial():
@@ -25,62 +24,98 @@ def obtener_partidos_mundial():
         datos = respuesta.json()
         lista_partidos = []
         for match in datos.get("matches", []):
-            if match["stage"] == "GROUP_STAGE":
-                # Capturar el horario en formato crudo UTC de internet
-                fecha_utc_str = match["utcDate"]
-                
-                # Convertir el texto de la API en un objeto de tiempo manipulable
-                fecha_utc = datetime.strptime(fecha_utc_str, "%Y-%m-%dT%H:%M:%SZ")
-                fecha_utc = pytz.utc.localize(fecha_utc)
-                
-                # CONFIGURACIÓN EXACTA PARA LIMA, PERÚ (UTC-5)
-                zona_local = pytz.timezone('America/Lima')
-                fecha_local = fecha_utc.astimezone(zona_local)
-                
-                # Formatear la fecha y hora con diseño amigable en español
-                fecha_formateada = fecha_local.strftime("%d/%m/%Y")
-                hora_formateada = fecha_local.strftime("%H:%M")
-
-                lista_partidos.append({
-                    "Grupo": match.get("group", "Fase de Grupos"),
-                    "Local": match["homeTeam"]["name"],
-                    "Visitante": match["awayTeam"]["name"],
-                    "Fecha": fecha_formateada,
-                    "Hora": hora_formateada
-                })
+            # IMPORTANTE: Captura tanto fase de grupos como las llaves finales automáticamente
+            lista_partidos.append({
+                "Fase": match["stage"].replace("_", " "),
+                "Grupo": match.get("group", "Fase Eliminatoria"),
+                "Local": match["homeTeam"]["name"],
+                "Visitante": match["awayTeam"]["name"],
+                "Fecha_UTC": match["utcDate"],
+                "Estado": match["status"]
+            })
         return pd.DataFrame(lista_partidos)
     except:
-        # Respaldo seguro por si hay microcortes en el servidor de fútbol
-        return pd.DataFrame([{"Grupo": "Grupo A", "Local": "Mexico", "Visitante": "South Africa", "Fecha": "11/06/2026", "Hora": "15:00"}])
+        return pd.DataFrame()
 
-@st.cache_data
-def obtener_estadisticas_actualizadas():
-    return {
-        "Argentina": {"ofensiva": 2.3, "defensiva": 0.6},
-        "France": {"ofensiva": 2.2, "defensiva": 0.7},
-        "Spain": {"ofensiva": 2.1, "defensiva": 0.7},
-        "Brazil": {"ofensiva": 2.0, "defensiva": 0.8},
-        "Mexico": {"ofensiva": 1.4, "defensiva": 1.1},
-        "USA": {"ofensiva": 1.5, "defensiva": 1.0},
-        "Germany": {"ofensiva": 1.9, "defensiva": 0.9},
-        "Japan": {"ofensiva": 1.7, "defensiva": 0.9},
-        "Morocco": {"ofensiva": 1.5, "defensiva": 0.8},
-        "South Africa": {"ofensiva": 1.1, "defensiva": 1.3},
-    }
+# ==========================================
+# 2. PROCESAMIENTO AUTOMÁTICO DE ESTADÍSTICAS REALES
+# ==========================================
+@st.cache_data(ttl=3600)
+def calcular_estadisticas_automaticas():
+    """
+    Analiza todos los partidos jugados en el torneo actual para calcular
+    las fuerzas reales de ataque y defensa de cada selección en internet.
+    """
+    url = f"{BASE_URL}competitions/WC/matches"
+    # Diccionario base por si un equipo no ha jugado ningún partido aún
+    fuerza_defecto = {"goles_anotados": 0, "goles_recibidos": 0, "partidos": 0}
+    rendimiento = {}
+    
+    try:
+        respuesta = requests.get(url, headers=HEADERS)
+        datos = respuesta.json()
+        matches = datos.get("matches", [])
+        
+        goles_totales = 0
+        partidos_totales = 0
+        
+        # 1. Acumular goles reales anotados y recibidos en vivo
+        for m in matches:
+            if m["status"] == "FINISHED":
+                loc = m["homeTeam"]["name"]
+                vis = m["awayTeam"]["name"]
+                g_l = m["score"]["fullTime"]["home"]
+                g_v = m["score"]["fullTime"]["away"]
+                
+                goles_totales += (g_l + g_v)
+                partidos_totales += 1
+                
+                if loc not in rendimiento: rendimiento[loc] = fuerza_defecto.copy()
+                if vis not in rendimiento: rendimiento[vis] = fuerza_defecto.copy()
+                
+                rendimiento[loc]["goles_anotados"] += g_l
+                rendimiento[loc]["goles_recibidos"] += g_v
+                rendimiento[loc]["partidos"] += 1
+                
+                rendimiento[vis]["goles_anotados"] += g_v
+                rendimiento[vis]["goles_recibidos"] += g_l
+                rendimiento[vis]["partidos"] += 1
+        
+        # Calcular el promedio de goles global del torneo (fórmula de Poisson)
+        promedio_global = (goles_totales / (partidos_totales * 2)) if partidos_totales > 0 else 1.3
+        
+        # 2. Traducir goles a métricas científicas de Ofensiva y Defensiva
+        stats_finales = {}
+        for equipo, datos_e in rendimiento.items():
+            pj = datos_e["partidos"]
+            if pj > 0:
+                prom_favor = datos_e["goles_anotados"] / pj
+                prom_contra = datos_e["goles_recibidos"] / pj
+                
+                # Fuerza relativa respecto al promedio de todo el torneo
+                stats_finales[equipo] = {
+                    "ofensiva": prom_favor / promedio_global,
+                    "defensiva": prom_contra / promedio_global
+                }
+        return stats_finales
+    except:
+        return {}
 
 df_partidos_real = obtener_partidos_mundial()
-stats_dinamicas = obtener_estadisticas_actualizadas()
+stats_automaticas = calcular_estadisticas_automaticas()
 
 # ==========================================
-# 2. CEREBRO PREDICTOR COHERENTE (CONCURSO)
+# 3. CEREBRO PREDICTOR MATEMÁTICO
 # ==========================================
 def calcular_prediccion_concurso(local, visitante):
-    default = {"ofensiva": 1.3, "defensiva": 1.2}
-    stats_l = stats_dinamicas.get(local, default)
-    stats_v = stats_dinamicas.get(visitante, default)
+    # Si la API no tiene registros del equipo aún, asigna valores neutros (fuerza equilibrada)
+    default = {"ofensiva": 1.0, "defensiva": 1.0}
+    stats_l = stats_automaticas.get(local, default)
+    stats_v = stats_automaticas.get(visitante, default)
     
-    goles_esperados_l = stats_l["ofensiva"] * stats_v["defensiva"]
-    goles_esperados_v = stats_v["ofensiva"] * stats_l["defensiva"]
+    # Goles promedio esperados puros basados en rendimiento real del torneo
+    goles_esperados_l = stats_l["ofensiva"] * stats_v["defensiva"] * 1.3
+    goles_esperados_v = stats_v["ofensiva"] * stats_l["defensiva"] * 1.3
     
     prob_local, prob_empate, prob_visitante = 0, 0, 0
     todos_los_marcadores = []
@@ -92,12 +127,7 @@ def calcular_prediccion_concurso(local, visitante):
             prob_marcador = p_l * p_v
             
             tipo = "LOCAL" if g_local > g_vis else ("VISITANTE" if g_local < g_vis else "EMPATE")
-            
-            todos_los_marcadores.append({
-                "marcador": (g_local, g_vis),
-                "prob": prob_marcador,
-                "tipo": tipo
-            })
+            todos_los_marcadores.append({"marcador": (g_local, g_vis), "prob": prob_marcador, "tipo": tipo})
             
             if tipo == "LOCAL": prob_local += prob_marcador
             elif tipo == "VISITANTE": prob_visitante += prob_marcador
@@ -118,53 +148,49 @@ def calcular_prediccion_concurso(local, visitante):
     }
 
 # ==========================================
-# 3. INTERFAZ VISUAL FINAL
+# 4. INTERFAZ VISUAL AUTOMÁTICA
 # ==========================================
-st.title("🏆 Bot Predictor Pro - Especial para la Quiniela del Trabajo")
-st.write("Datos en tiempo real procesados matemáticamente para darte una conclusión lógica directa para tu concurso.")
+st.title("🏆 Bot Predictor 100% Automatizado")
+st.write("Estadísticas de ataque y defensa calculadas dinámicamente según los goles reales del torneo.")
 st.markdown("---")
 
 if df_partidos_real.empty:
-    st.warning("Cargando la programación oficial y sincronizando horarios...")
+    st.warning("Conectando con los servidores de la FIFA...")
 else:
-    st.sidebar.header("Filtros")
-    grupos = ["Todos"] + sorted(list(df_partidos_real["Grupo"].unique()))
-    grupo_sel = st.sidebar.selectbox("Selecciona un Grupo:", grupos)
+    # Filtro inteligente por etapa del torneo (se actualizará solo a Octavos, Cuartos, etc.)
+    st.sidebar.header("Etapa del Torneo")
+    etapas = sorted(list(df_partidos_real["Fase"].unique()))
+    fase_sel = st.sidebar.selectbox("Selecciona la Fase:", etapas)
     
-    df_filtrado = df_partidos_real if grupo_sel == "Todos" else df_partidos_real[df_partidos_real["Grupo"] == grupo_sel]
+    df_filtrado = df_partidos_real[df_partidos_real["Fase"] == fase_sel]
     
     for index, fila in df_filtrado.iterrows():
         local = fila["Local"]
         visitante = fila["Visitante"]
-        grupo = fila["Grupo"]
-        fecha = fila["Fecha"]
-        hora = fila["Hora"]
+        
+        # Ajustar fecha y hora a Perú
+        fecha_utc = datetime.strptime(fila["Fecha_UTC"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.utc)
+        fecha_local = fecha_utc.astimezone(pytz.timezone('America/Lima'))
         
         res = calcular_prediccion_concurso(local, visitante)
         g_l, g_v = res["Marcador_Concurso"]
         
-        if res["Tendencia"] == "LOCAL": texto_conclusion = f"🎯 GANADOR: {local}"
-        elif res["Tendencia"] == "VISITANTE": texto_conclusion = f"🎯 GANADOR: {visitante}"
-        else: texto_conclusion = "🎯 RESULTADO: Empate"
+        texto_conclusion = f"🎯 GANADOR: {local}" if res["Tendencia"] == "LOCAL" else (f"🎯 GANADOR: {visitante}" if res["Tendencia"] == "VISITANTE" else "🎯 RESULTADO: Empate")
         
-        # El título despliega la hora real exacta ajustada a Lima
-        with st.expander(f"📅 {fecha} a las {hora} hs (Hora Perú) | {grupo}: {local} vs {visitante}"):
-            
-            st.info(f"### 📋 RECOMENDACIÓN PARA TU QUINIELA:\n**{texto_conclusion}** con un marcador exacto de **{local} {g_l} - {g_v} {visitante}**")
+        with st.expander(f"📅 {fecha_local.strftime('%d/%m/%Y')} - {fecha_local.strftime('%H:%M')} hs | {local} vs {visitante}"):
+            st.info(f"### 📋 RECOMENDACIÓN:\n**{texto_conclusion}** con un marcador de **{local} {g_l} - {g_v} {visitante}**")
             
             col1, col2 = st.columns([2, 1])
             with col1:
-                st.write("**📊 Respaldo de Probabilidades Generales:**")
+                st.write("**📊 Probabilidades calculadas por rendimiento en el torneo:**")
                 st.write(f"Victoria {local}: {res['P_Local']}%")
                 st.progress(int(res['P_Local']))
                 st.write(f"Empate: {res['P_Empate']}%")
                 st.progress(int(res['P_Empate']))
                 st.write(f"Victoria {visitante}: {res['P_Visitante']}%")
                 st.progress(int(res['P_Visitante']))
-                
             with col2:
-                st.write("**🎲 Marcadores alternativos sueltos:**")
+                st.write("**🎲 Fórmulas alternativas:**")
                 for _, m_fila in res["Top_Marcadores"].iterrows():
                     ml, mv = m_fila["marcador"]
-                    porc = round(m_fila["prob"] * 100, 1)
-                    st.write(f"• {local} {ml} - {mv} {visitante} ({porc}%)")
+                    st.write(f"• {local} {ml} - {mv} {visitante} ({round(m_fila['prob']*100,1)}%)")
