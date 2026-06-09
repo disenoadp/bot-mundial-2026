@@ -8,43 +8,48 @@ import pytz
 import unicodedata
 
 # Configuración del Dashboard
-st.set_page_config(page_title="Bot Predictor 100% Autónomo", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="Bot Predictor Quiniela — Análisis Real", page_icon="⚽", layout="wide")
 
 API_TOKEN = st.secrets["FOOTBALL_API_TOKEN"]
 BASE_URL = "https://api.football-data.org/v4/"
 HEADERS = {"X-Auth-Token": API_TOKEN}
 
-# FUENTE DE DATOS REAL Y ACTIVA
+# FUENTE DE DATOS HISTÓRICA COMPLETA Y ACTIVA
 URL_HISTORICO_GLOBAL = "https://raw.githubusercontent.com/datasets/football-data/master/data/international-results.csv"
 
 def tokenizar_y_limpiar(texto):
     """
-    Convierte el nombre en un conjunto de palabras limpias para buscar coincidencias.
-    Ejemplo: 'South Korea' -> {'south', 'korea'}
-             'Korea Republic' -> {'korea', 'republic'}
+    Convierte de forma segura cualquier nombre en un conjunto de palabras clave de coincidencia.
+    Evita errores si el texto viene vacío o como None desde la API.
     """
-    if not texto or not isinstance(texto, str):
+    if not texto or pd.isna(texto) or not isinstance(texto, str):
         return set()
-    # Quitar tildes y caracteres especiales
+    
+    # Remoción de tildes y normalización de caracteres
     texto = unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('utf-8')
-    # Reemplazos comunes de iniciales/abreviaturas para estandarizar
-    texto = texto.lower().replace("usa", "united states").replace("eeuu", "united states")
-    # Separar por palabras individuales
+    texto = texto.lower()
+    
+    # Estandarizaciones globales comunes de nombres de países
+    texto = texto.replace("usa", "united states").replace("eeuu", "united states")
+    texto = texto.replace("south korea", "korea republic").replace("corea del sur", "korea republic")
+    texto = texto.replace("mexico", "mexico").replace("south africa", "south africa")
+    
+    # Separar por palabras limpias
     palabras = texto.replace("-", " ").replace("_", " ").split()
     return set(palabras)
 
 # ==========================================
-# 1. PROCESAMIENTO AUTOMÁTICO DE LA BASE DE DATOS CSV
+# 1. CARGA AUTOMÁTICA Y PROCESAMIENTO DEL CSV
 # ==========================================
 @st.cache_data(ttl=86400)
 def cargar_base_datos_real():
-    """Descarga el CSV real, indexa todos los países y extrae métricas estadísticas."""
+    """Descarga el CSV real, indexa todas las selecciones y procesa sus estadísticas globales."""
     try:
         df = pd.read_csv(URL_HISTORICO_GLOBAL)
         df.columns = [col.lower() for col in df.columns]
         df['date'] = pd.to_datetime(df['date'])
         
-        # Filtramos desde el año 2010 para capturar la era moderna
+        # Filtramos desde el año 2010 para mantener la relevancia competitiva moderna
         df_moderno = df[df['date'].dt.year >= 2010].copy()
         
         rendimiento = {}
@@ -52,13 +57,13 @@ def cargar_base_datos_real():
         partidos_totales = 0
         
         for _, fila in df_moderno.iterrows():
-            loc = str(fila['home_team'])
-            vis = str(fila['away_team'])
+            loc = str(fila['home_team']).strip()
+            vis = str(fila['away_team']).strip()
             try:
                 g_l = int(fila['home_score'])
                 g_v = int(fila['away_score'])
             except:
-                continue
+                continue # Omitir filas mal formadas
             
             goles_totales += (g_l + g_v)
             partidos_totales += 1
@@ -72,7 +77,7 @@ def cargar_base_datos_real():
                 
         promedio_global = (goles_totales / (partidos_totales * 2)) if partidos_totales > 0 else 1.35
         
-        # Guardamos las estadísticas indexadas
+        # Generar diccionario estructurado indexado por su nombre real en el CSV
         stats_finales = {}
         for equipo, datos in rendimiento.items():
             pj = datos["partidos"]
@@ -81,15 +86,54 @@ def cargar_base_datos_real():
                     "ofensiva": round((datos["goles_anotados"] / pj) / promedio_global, 2),
                     "defensiva": round((datos["goles_recibidos"] / pj) / promedio_global, 2),
                     "pj": pj,
-                    "tokens": tokenizar_y_limpiar(equipo) # Guardamos sus palabras clave para el buscador
+                    "tokens": tokenizar_y_limpiar(equipo)
                 }
         return stats_finales, promedio_global
     except Exception as e:
-        st.error(f"Fallo crítico al conectar con la base de datos histórica: {e}")
+        st.error(f"Error crítico al leer la base de datos CSV: {e}")
         return {}, 1.35
 
+stats_historicas, prom_global = cargar_base_datos_real()
+
 # ==========================================
-# 2. CONEXIÓN EN VIVO CON LA API DEL MUNDIAL
+# 2. MOTOR DE BÚSQUEDA SEMÁNTICO POR INTERSECCIÓN REFORZADO
+# ==========================================
+def buscar_estadisticas_reales(nombre_api):
+    # Validamos que el nombre recibido de la API sea una cadena válida
+    if not nombre_api or not isinstance(nombre_api, str):
+        return {"nombre_real_csv": "Desconocido", "ofensiva": 1.0, "defensiva": 1.0, "pj": 0}
+        
+    tokens_api = tokenizar_y_limpiar(nombre_api)
+    
+    mejor_coincidencia = None
+    max_coincidencias = 0
+    
+    # Comparamos dinámicamente contra los conjuntos de palabras clave de todo el CSV
+    for nombre_csv, info in stats_historicas.items():
+        coincidencias = len(tokens_api.intersection(info["tokens"]))
+        if coiled_matches := coincidencias:
+            if coiled_matches > max_coincidencias:
+                max_coincidencias = coiled_matches
+                mejor_coincidencia = nombre_csv
+
+    # Si hay una coincidencia de palabras válida, extraemos la data real acumulada
+    if mejor_coincidencia and max_coincidencias > 0:
+        res = stats_historicas[mejor_coincidencia].copy()
+        res["nombre_real_csv"] = mejor_coincidencia
+        return res
+            
+    # Contingencia ultra segura libre de TypeErrors si el equipo es 100% nuevo
+    seguridad_nombre = str(nombre_api)
+    semilla = sum(ord(c) for c in seguridad_nombre) if seguridad_nombre else 10
+    return {
+        "nombre_real_csv": f"{nombre_api} (Sin registro en CSV)",
+        "ofensiva": round(1.0 + (semilla % 3) * 0.05, 2),
+        "defensiva": round(1.0 + (semilla % 2) * 0.05, 2),
+        "pj": 0
+    }
+
+# ==========================================
+# 3. CONEXIÓN EN VIVO CON LA API DEL MUNDIAL
 # ==========================================
 @st.cache_data(ttl=3600)
 def obtener_partidos_mundial():
@@ -113,42 +157,6 @@ def obtener_partidos_mundial():
         return pd.DataFrame()
 
 df_partidos_real = obtener_partidos_mundial()
-stats_historicas, prom_global = cargar_base_datos_real()
-
-# ==========================================
-# 3. MOTOR DE BÚSQUEDA SEMÁNTICO POR INTERSECCIÓN (SIN MANUALES)
-# ==========================================
-def buscar_estadisticas_reales(nombre_api):
-    tokens_api = tokenizar_y_limpiar(nombre_api)
-    if not tokens_api:
-        return {"nombre_real_csv": nombre_api, "ofensiva": 1.0, "defensiva": 1.0, "pj": 0}
-
-    mejor_coincidencia = None
-    max_coincidencias = 0
-    
-    # Recorremos dinámicamente todo el CSV buscando cruces de palabras clave
-    for nombre_csv, info in stats_historicas.items():
-        # Calculamos cuántas palabras comparten (Intersección de conjuntos)
-        coincidencias = len(tokens_api.intersection(info["tokens"]))
-        
-        if coincidencias > max_coincidencias:
-            max_coincidencias = coincidencias
-            mejor_coincidencia = nombre_csv
-
-    # Si encontramos un match inteligente en el CSV, extraemos sus datos reales
-    if mejor_coincidencia and max_coincidencias > 0:
-        res = stats_historicas[mejor_coincidencia].copy()
-        res["nombre_real_csv"] = mejor_coincidencia
-        return res
-            
-    # Contingencia por si es un equipo completamente nuevo sin registros históricos
-    semilla = sum(ord(c) for c in str(nombre_api))
-    return {
-        "nombre_real_csv": f"{nombre_api} (Sin registro en CSV)",
-        "ofensiva": round(1.0 + (semilla % 3) * 0.05, 2),
-        "defensiva": round(1.0 + (semilla % 2) * 0.05, 2),
-        "pj": 0
-    }
 
 # ==========================================
 # 4. PREDICTOR MATEMÁTICO DE POISSON
@@ -197,14 +205,14 @@ def calcular_prediccion_concurso(local, visitante):
 # 5. INTERFAZ GRÁFICA (STREAMLIT)
 # ==========================================
 st.title("🏆 Bot Predictor Quiniela — Automatización Semántica Pura")
-st.write("Buscador dinámico por palabras clave. El sistema asocia la API y el CSV de forma autónoma.")
+st.write("Buscador dinámico correlativo. Vinculación automática API ⇄ CSV histórico.")
 st.markdown("---")
 
 if df_partidos_real.empty:
-    st.warning("Descargando partidos desde la API oficial...")
+    st.warning("Descargando partidos desde la API oficial de fútbol...")
 else:
     etapas = sorted(list(df_partidos_real["Fase"].unique()))
-    fase_sel = st.sidebar.selectbox("Selecciona la Fase:", etapas)
+    fase_sel = st.sidebar.selectbox("Selecciona la Fase del Concurso:", etapas)
     
     df_filtrado = df_partidos_real[df_partidos_real["Fase"] == fase_sel]
     
@@ -215,23 +223,23 @@ else:
         res = calcular_prediccion_concurso(local, visitante)
         g_l, g_v = res["Marcador_Concurso"]
         
-        texto_conclusion = f"🎯 GANADOR: {local}" if res["Tendencia"] == "LOCAL" else (f"🎯 GANADOR: {visitante}" if res["Tendencia"] == "VISITANTE" else "🎯 RECOMENDACIÓN: Empate")
+        texto_conclusion = f"🎯 GANADOR SUGERIDO: {local}" if res["Tendencia"] == "LOCAL" else (f"🎯 GANADOR SUGERIDO: {visitante}" if res["Tendencia"] == "VISITANTE" else "🎯 RECOMENDACIÓN: Empate Técnico")
         
         with st.expander(f"⚽ {local} vs {visitante}"):
             st.info(f"### 📋 PRONÓSTICO: **{local} {g_l} - {g_v} {visitante}**\n*{texto_conclusion}*")
             
             col1, col2 = st.columns([2, 1])
             with col1:
-                st.write(f"**{local}** *(Emparejado de forma autónoma con: {res['Stats_L']['nombre_real_csv']}*)")
-                st.write(f"↳ **Partidos reales analizados: {res['Stats_L']['pj']}** | Ataque: {res['Stats_L']['ofensiva']}")
-                st.progress(int(res['P_Local']))
+                st.write(f"**{local}** *(Emparejado con: `{res['Stats_L']['nombre_real_csv']}`)*")
+                st.write(f"↳ **Partidos históricos reales analizados: {res['Stats_L']['pj']}** | Factor Ataque: {res['Stats_L']['ofensiva']}")
+                st.progress(max(0, min(int(res['P_Local']), 100)))
                 
                 st.write(f"**Empate:** {res['P_Empate']}%")
-                st.progress(int(res['P_Empate']))
+                st.progress(max(0, min(int(res['P_Empate']), 100)))
                 
-                st.write(f"**{visitante}** *(Emparejado de forma autónoma con: {res['Stats_V']['nombre_real_csv']}*)")
-                st.write(f"↳ **Partidos reales analizados: {res['Stats_V']['pj']}** | Ataque: {res['Stats_V']['ofensiva']}")
-                st.progress(int(res['P_Visitante']))
+                st.write(f"**{visitante}** *(Emparejado con: `{res['Stats_V']['nombre_real_csv']}`)*")
+                st.write(f"↳ **Partidos históricos reales analizados: {res['Stats_V']['pj']}** | Factor Ataque: {res['Stats_V']['ofensiva']}")
+                st.progress(max(0, min(int(res['P_Visitante']), 100)))
             with col2:
                 st.write("**🎲 Marcadores más probables:**")
                 for _, m_fila in res["Top_Marcadores"].iterrows():
