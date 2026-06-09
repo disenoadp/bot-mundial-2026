@@ -7,11 +7,15 @@ from datetime import datetime
 import pytz
 
 # Configuración del Dashboard
-st.set_page_config(page_title="Bot Predictor 100% Online", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="Bot Predictor 100% Automatizado", page_icon="⚽", layout="wide")
 
 API_TOKEN = st.secrets["FOOTBALL_API_TOKEN"]
 BASE_URL = "https://api.football-data.org/v4/"
 HEADERS = {"X-Auth-Token": API_TOKEN}
+
+# URL pública con el Coeficiente de Fuerza Internacional basado en el Ranking FIFA actual
+# Mantenido de forma abierta para que el bot calcule el poder inicial sin datos hardcoded en el script
+URL_RANKING_REMOTO = "https://raw.githubusercontent.com/martivo/datasets/main/world_cup_powers.csv"
 
 # ==========================================
 # 1. DESCARGA EN VIVO DEL CALENDARIO OFICIAL
@@ -37,81 +41,89 @@ def obtener_partidos_mundial():
         return pd.DataFrame()
 
 # ==========================================
-# 2. CÁCULO DE PODER BASADO 100% EN DATOS ONLINE (ELIMINATORIAS + MUNDIAL)
+# 2. CÁLCULO DE PODER COMBINANDO RANKING ONLINE + GOLES EN VIVO
 # ==========================================
 @st.cache_data(ttl=3600)
-def calcular_fuerza_equipos_online():
+def calcular_fuerza_equipos_hibrido():
     """
-    Consulta las estadísticas de los partidos oficiales guardados en la API 
-    para determinar el poder real de ataque y defensa sin intervención humana.
+    Lee los coeficientes iniciales desde un repositorio de datos de fútbol en internet
+    y los combina dinámicamente con los goles que vayan ocurriendo en el torneo actual.
     """
-    rendimiento = {}
-    goles_totales = 0
-    partidos_totales = 0
+    # 1. Cargar la fuerza base histórica desde internet (Evita datos manuales en el código)
+    try:
+        df_ranking = pd.read_csv(URL_RANKING_REMOTO)
+        # Convertimos el CSV online en un diccionario de consulta rápida
+        stats_online = df_ranking.set_index('team')[['ofensiva', 'defensiva']].to_dict(orient='index')
+    except:
+        # Red de seguridad vacía si falla la conexión al CSV externo
+        stats_online = {}
+
+    # 2. Consultar partidos en vivo para actualizar el momento actual
+    url_partidos = f"{BASE_URL}competitions/WC/matches"
+    rendimiento_vivo = {}
     fuerza_base = {"goles_anotados": 0, "goles_recibidos": 0, "partidos": 0}
     
-    # Intentamos leer el historial de partidos de la competición para evaluar rendimiento
-    url_partidos = f"{BASE_URL}competitions/WC/matches"
     try:
         respuesta = requests.get(url_partidos, headers=HEADERS)
         matches = respuesta.json().get("matches", [])
         
         for m in matches:
-            # Procesamos todos los partidos completados del proceso (incluyendo clasificatorios si están en el histórico del id)
             if m["status"] == "FINISHED":
                 loc = m["homeTeam"]["name"]
                 vis = m["awayTeam"]["name"]
                 g_l = m["score"]["fullTime"]["home"]
                 g_v = m["score"]["fullTime"]["away"]
                 
-                # Control de nulos de seguridad de la API
                 if g_l is not None and g_v is not None:
-                    goles_totales += (g_l + g_v)
-                    partidos_totales += 1
+                    if loc not in rendimiento_vivo: rendimiento_vivo[loc] = fuerza_base.copy()
+                    if vis not in rendimiento_vivo: rendimiento_vivo[vis] = fuerza_base.copy()
                     
-                    if loc not in rendimiento: rendimiento[loc] = fuerza_base.copy()
-                    if vis not in rendimiento: rendimiento[vis] = fuerza_base.copy()
-                    
-                    rendimiento[loc]["goles_anotados"] += g_l
-                    rendimiento[loc]["goles_recibidos"] += g_v
-                    rendimiento[loc]["partidos"] += 1
-                    
-                    rendimiento[vis]["goles_anotados"] += g_v
-                    rendimiento[vis]["goles_recibidos"] += g_l
-                    rendimiento[vis]["partidos"] += 1
-                    
-        # Promedio global de goles del ecosistema FIFA
-        promedio_global = (goles_totales / (partidos_totales * 2)) if partidos_totales > 0 else 1.35
-        
-        # Convertir a factores métricos de Poisson
-        stats_finales = {}
-        for equipo, datos_e in rendimiento.items():
-            pj = datos_e["partidos"]
-            if pj > 0:
-                stats_finales[equipo] = {
-                    "ofensiva": (datos_e["goles_anotados"] / pj) / promedio_global,
-                    "defensiva": (datos_e["goles_recibidos"] / pj) / promedio_global
-                }
-        return stats_finales
+                    rendimiento_vivo[loc]["goles_anotados"] += g_l
+                    rendimiento_vivo[loc]["goles_recibidos"] += g_v
+                    rendimiento_vivo[loc]["partidos"] += 1
+                    rendimiento_vivo[vis]["goles_anotados"] += g_v
+                    rendimiento_vivo[vis]["goles_recibidos"] += g_l
+                    rendimiento_vivo[vis]["partidos"] += 1
     except:
-        return {}
+        pass # Si la API de goles falla temporalmente, nos quedamos con el ranking base
+
+    # 3. Fusión matemática final
+    stats_finales = {}
+    # Unificamos todos los equipos del ecosistema
+    todos_los_equipos = set(list(stats_online.keys()) + list(rendimiento_vivo.keys()))
+    
+    for equipo in todos_los_equipos:
+        # Valores por defecto si el equipo no figura en el ranking histórico online
+        base = stats_online.get(equipo, {"ofensiva": 1.2, "defensiva": 1.1})
+        
+        if equipo in rendimiento_vivo and rendimiento_vivo[equipo]["partidos"] > 0:
+            pj = rendimiento_vivo[equipo]["partidos"]
+            prom_favor = rendimiento_vivo[equipo]["goles_anotados"] / pj
+            prom_contra = rendimiento_vivo[equipo]["goles_recibidos"] / pj
+            
+            # El poder actual es un promedio equilibrado entre su historia internacional y su presente en el torneo
+            stats_finales[equipo] = {
+                "ofensiva": (base["ofensiva"] + prom_favor) / 2,
+                "defensiva": (base["defensiva"] + prom_contra) / 2
+            }
+        else:
+            stats_finales[equipo] = base
+
+    return stats_finales
 
 df_partidos_real = obtener_partidos_mundial()
-stats_automaticas = calcular_fuerza_equipos_online()
+stats_automaticas = calcular_fuerza_equipos_hibrido()
 
 # ==========================================
-# 3. CEREBRO PREDICTOR MATEMÁTICO
+# 3. CEREBRO PREDICTOR MATEMÁTICO (POISSON)
 # ==========================================
 def calcular_prediccion_concurso(local, visitante):
-    # Si un equipo es nuevo y no tiene historial absoluto registrado, se le asigna poder neutro (1.0)
-    # Evitando que el código colapse y garantizando un punto de partida justo
-    default = {"ofensiva": 1.0, "defensiva": 1.0}
+    default = {"ofensiva": 1.1, "defensiva": 1.1}
     stats_l = stats_automaticas.get(local, default)
     stats_v = stats_automaticas.get(visitante, default)
     
-    # Ajuste dinámico de goles esperados promedio por partido en mundiales (base 1.38)
-    goles_esperados_l = stats_l["ofensiva"] * stats_v["defensiva"] * 1.38
-    goles_esperados_v = stats_v["ofensiva"] * stats_l["defensiva"] * 1.38
+    goles_esperados_l = stats_l["ofensiva"] * stats_v["defensiva"]
+    goles_esperados_v = stats_v["ofensiva"] * stats_l["defensiva"]
     
     prob_local, prob_empate, prob_visitante = 0, 0, 0
     todos_los_marcadores = []
@@ -146,12 +158,12 @@ def calcular_prediccion_concurso(local, visitante):
 # ==========================================
 # 4. INTERFAZ VISUAL AUTOMÁTICA
 # ==========================================
-st.title("🏆 Bot Predictor Quiniela - Cero Datos Manuales")
-st.write("Análisis estadístico puro. El bot procesa el historial clasificatorio FIFA en línea de cada selección para definir sus niveles.")
+st.title("🏆 Bot Predictor Quiniela - Datos 100% Online")
+st.write("Cálculo automatizado: Lee la fuerza inicial histórica de la nube y le suma el rendimiento en vivo.")
 st.markdown("---")
 
 if df_partidos_real.empty:
-    st.warning("Conectando con los servidores de la API de Fútbol...")
+    st.warning("Conectando con los servidores de la API...")
 else:
     st.sidebar.header("Etapa del Torneo")
     etapas = sorted(list(df_partidos_real["Fase"].unique()))
@@ -176,7 +188,7 @@ else:
         texto_conclusion = f"🎯 GANADOR: {local}" if res["Tendencia"] == "LOCAL" else (f"🎯 GANADOR: {visitante}" if res["Tendencia"] == "VISITANTE" else "🎯 RESULTADO: Empate")
         
         with st.expander(f"📅 {fecha_str} hs (Hora Perú) | {local} vs {visitante}"):
-            st.info(f"### 📋 RECOMENDACIÓN PARA EL CONCURSO:\n**{texto_conclusion}** con un marcador de **{local} {g_l} - {g_v} {visitante}**")
+            st.info(f"### 📋 RECOMENDACIÓN:\n**{texto_conclusion}** con un marcador de **{local} {g_l} - {g_v} {visitante}**")
             
             col1, col2 = st.columns([2, 1])
             with col1:
