@@ -95,13 +95,11 @@ def calcular_estadisticas_automaticas():
                 rendimiento_vivo[vis]["goles_recibidos"] += g_l
                 rendimiento_vivo[vis]["partidos"] += 1
         
-        # Combinar datos históricos con los de en vivo
         stats_finales = {}
         
-        # Mapeamos todos los equipos posibles utilizando la lista histórica como base inicial
-        for equipo, datos_hist en RENDIMIENTO_HISTORICO_INICIAL.items():
+        # Aquí corregimos el 'en' por 'in'
+        for equipo, datos_hist in RENDIMIENTO_HISTORICO_INICIAL.items():
             if equipo in rendimiento_vivo and rendimiento_vivo[equipo]["partidos"] > 0:
-                # Si ya hay partidos en vivo, promedia el historial con la actualidad
                 pj = rendimiento_vivo[equipo]["partidos"]
                 prom_favor_vivo = rendimiento_vivo[equipo]["goles_anotados"] / pj
                 prom_contra_vivo = rendimiento_vivo[equipo]["goles_recibidos"] / pj
@@ -111,7 +109,6 @@ def calcular_estadisticas_automaticas():
                     "defensiva": (datos_hist["defensiva"] + prom_contra_vivo) / 2
                 }
             else:
-                # Si no ha jugado en el torneo, usa su fuerza histórica real
                 stats_finales[equipo] = datos_hist
                 
         return stats_finales
